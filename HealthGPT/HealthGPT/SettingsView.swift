@@ -10,21 +10,28 @@ import OSLog
 import SpeziChat
 import SpeziLLMOpenAI
 import SwiftUI
+import SafariServices
+
+let appointmentReminderFHIRTestData = readJSONFile(fileName: "AppointmentReminderFHIRBundle")
+let careAnomalyFHIRTestData = readJSONFile(fileName: "CareAnomalyFHIRBundle")
 
 struct SettingsView: View {
     private enum SettingsDestinations {
         case openAIKey
         case openAIModelSelection
+        case testDataViewer
     }
     
     @State private var path = NavigationPath()
+    @State private var testDataInputText: String = ""
+    @State private var isSafariViewPresented: Bool = false
+    @State private var isNavigatingToTestDataViewer: Bool = false
     @Environment(\.dismiss) private var dismiss
     @Environment(HealthDataInterpreter.self) private var healthDataInterpreter
     @AppStorage(StorageKeys.enableTextToSpeech) private var enableTextToSpeech = StorageKeys.Defaults.enableTextToSpeech
     @AppStorage(StorageKeys.llmSource) private var llmSource = StorageKeys.Defaults.llmSource
     @AppStorage(StorageKeys.openAIModel) private var openAIModel = LLMOpenAIModelType.gpt4
     let logger = Logger(subsystem: "HealthGPT", category: "Settings")
-
     
     var body: some View {
         NavigationStack(path: $path) {
@@ -35,6 +42,7 @@ struct SettingsView: View {
 
                 chatSettings
                 speechSettings
+                testData
                 disclaimer
             }
             .navigationTitle("SETTINGS_TITLE")
@@ -86,6 +94,54 @@ struct SettingsView: View {
         }
     }
     
+    private var testData: some View {
+        Section("SETTINGS_TESTDATA") {
+            NavigationLink(destination: navigate(to: .testDataViewer)
+                .onAppear {
+                    testDataInputText = appointmentReminderFHIRTestData ?? ""
+                }) {
+                Text("SETTINGS_TESTDATA_APPOINTMENT")
+            }
+            .accessibilityIdentifier("testdataButton")
+            
+            NavigationLink(destination: navigate(to: .testDataViewer)
+                .onAppear {
+                    testDataInputText = careAnomalyFHIRTestData ?? ""
+                }) {
+                Text("SETTINGS_TESTDATA_ANOMALY")
+            }
+            .accessibilityIdentifier("testdataButton")
+            
+            NavigationLink(destination: navigate(to: .testDataViewer)
+                .onAppear {
+                    testDataInputText = ""
+                }) {
+                Text("SETTINGS_TESTDATA_CUSTOM")
+            }
+            .accessibilityIdentifier("testdataButton")
+            
+            Button(action: {
+                isSafariViewPresented = true
+            }) {
+                Text("SETTINGS_TESTDATA_CUSTOM_WEB")
+            }
+            .accessibilityIdentifier("testdataButton")
+            .sheet(isPresented: $isSafariViewPresented) {
+                if let url = URL(string: "https://smemas-data-generator.streamlit.app/") {
+                    SafariView(url: url) { copiedText in
+                        testDataInputText = copiedText
+                        isNavigatingToTestDataViewer = true
+                    }
+                }
+            }
+            .background(
+                NavigationLink(destination: navigate(to: .testDataViewer), isActive: $isNavigatingToTestDataViewer) {
+                    EmptyView()
+                }
+            )
+        }
+    }
+    
     private var disclaimer: some View {
         Section("SETTINGS_DISCLAIMER_TITLE") {
             Text("SETTINGS_DISCLAIMER_TEXT")
@@ -95,6 +151,43 @@ struct SettingsView: View {
     private func navigate(to destination: SettingsDestinations) -> some View {
         Group {
             switch destination {
+            case .testDataViewer:
+                VStack {
+                    TextEditor(text: $testDataInputText)
+                        .padding()
+                        .background(Color.gray.opacity(0.2))
+                        .cornerRadius(8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    HStack {
+                        Button(action: {
+                            testDataInputText = ""
+                        }) {
+                            Text("Clear")
+                                .padding()
+                                .background(Color.red)
+                                .foregroundColor(.white)
+                                .cornerRadius(8)
+                        }
+
+                        Spacer()
+
+                        Button(action: {
+                            Task {
+                                await healthDataInterpreter.generateTestData(testdata: testDataInputText)
+                                dismiss()
+                            }
+                        }) {
+                            Text("SETTINGS_POPULATE_TESTDATA")
+                                .padding()
+                                .background(Color.blue)
+                                .foregroundColor(.white)
+                                .cornerRadius(8)
+                        }
+                    }
+                    .padding()
+                }
+                .padding()
             case .openAIKey:
                 LLMOpenAIAPITokenOnboardingStep(actionText: "OPEN_AI_KEY_SAVE_ACTION") {
                     path.removeLast()
@@ -114,6 +207,67 @@ struct SettingsView: View {
         }
     }
 }
+
+private func readJSONFile(fileName: String) -> String? {
+    // Locate the JSON file in the app bundle
+    guard let fileURL = Bundle.main.url(forResource: fileName, withExtension: "json") else {
+        print("JSON file not found")
+        return nil
+    }
+    
+    do {
+        // Read the file content
+        let data = try Data(contentsOf: fileURL)
+        
+        // Convert the data to a string
+        if let jsonString = String(data: data, encoding: .utf8) {
+            return jsonString
+        } else {
+            print("Unable to convert data to string")
+            return nil
+        }
+    } catch {
+        print("Error reading file: \(error.localizedDescription)")
+        return nil
+    }
+}
+
+struct SafariView: UIViewControllerRepresentable {
+    let url: URL
+    var onDismiss: (String) -> Void
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        let config = SFSafariViewController.Configuration()
+        config.entersReaderIfAvailable = true
+        let safariVC = SFSafariViewController(url: url, configuration: config)
+        safariVC.delegate = context.coordinator
+        return safariVC
+    }
+    
+    func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
+    
+    class Coordinator: NSObject, SFSafariViewControllerDelegate {
+        var parent: SafariView
+        
+        init(_ parent: SafariView) {
+            self.parent = parent
+        }
+        
+        func safariViewControllerDidFinish(_ controller: SFSafariViewController) {
+            parent.onDismiss(fetchTextFromClipboard())
+        }
+        
+        private func fetchTextFromClipboard() -> String {
+            return UIPasteboard.general.string ?? ""
+        }
+    }
+}
+
+
 
 #Preview {
     SettingsView()
